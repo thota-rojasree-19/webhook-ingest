@@ -31,10 +31,38 @@ func New(s *store.Store, c *stats.Cache, rdb *redis.Client, log *slog.Logger) *S
 	return &Service{store: s, cache: c, rdb: rdb, log: log}
 }
 
-// Stats returns the cached totals for an account.
-func (s *Service) Stats(accountID string) stats.AccountStats {
-	return s.cache.Get(accountID)
+// LoadAccountStats populates the in-memory cache from Postgres.
+func (s *Service) LoadAccountStats(ctx context.Context) error {
+	allStats, err := s.store.AllAccountStats(ctx)
+	if err != nil {
+		return err
+	}
+	for accountID, st := range allStats {
+		s.cache.Set(accountID, stats.AccountStats{
+			CallCount:        st.CallCount,
+			TotalDurationSec: st.TotalDurationSec,
+		})
+	}
+	return nil
 }
+
+// Stats returns the cached totals for an account. If absent in cache, it loads from Postgres.
+func (s *Service) Stats(accountID string) stats.AccountStats {
+	st := s.cache.Get(accountID)
+	if st.CallCount == 0 && st.TotalDurationSec == 0 {
+		dbStats, err := s.store.AccountStats(context.Background(), accountID)
+		if err == nil && (dbStats.CallCount > 0 || dbStats.TotalDurationSec > 0) {
+			cacheSt := stats.AccountStats{
+				CallCount:        dbStats.CallCount,
+				TotalDurationSec: dbStats.TotalDurationSec,
+			}
+			s.cache.Set(accountID, cacheSt)
+			return cacheSt
+		}
+	}
+	return st
+}
+
 
 // Ingest stores a delivery and kicks off processing. Processing runs
 // asynchronously so the provider gets a fast acknowledgement.

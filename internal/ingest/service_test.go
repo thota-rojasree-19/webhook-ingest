@@ -327,6 +327,34 @@ func TestRecoverPendingRecordings(t *testing.T) {
 	}
 }
 
+func TestStatsCacheConsistencyAfterRestart(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// Create a new Service instance with a fresh, empty cache simulating a service restart
+	cfg := config.Load()
+	rdb, err := redisclient.New(ctx, cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("redis: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	restartedSvc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	got := restartedSvc.Stats(accountID)
+	if got.CallCount != 1 || got.TotalDurationSec != 143 {
+		t.Fatalf("after restart: got %+v, want CallCount=1 TotalDurationSec=143", got)
+	}
+}
+
+
 
 
 

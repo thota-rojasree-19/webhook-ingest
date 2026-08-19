@@ -208,3 +208,24 @@ func (s *Store) PendingRecordings(ctx context.Context) ([]string, error) {
 	return callIDs, rows.Err()
 }
 
+// AllAccountStats reads all per-account aggregate totals from Postgres.
+func (s *Store) AllAccountStats(ctx context.Context) (map[string]Stats, error) {
+	rows, err := s.pool.Query(ctx, `SELECT account_id, call_count, total_duration_sec FROM account_stats`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[string]Stats)
+	for rows.Next() {
+		var accountID string
+		var st Stats
+		if err := rows.Scan(&accountID, &st.CallCount, &st.TotalDurationSec); err != nil {
+			return nil, err
+		}
+		res[accountID] = st
+	}
+	return res, rows.Err()
+}
+
+

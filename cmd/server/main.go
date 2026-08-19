@@ -40,6 +40,9 @@ func main() {
 	defer func() { _ = rdb.Close() }()
 
 	svc := ingest.New(st, stats.NewCache(), rdb, log)
+	if err := svc.LoadAccountStats(ctx); err != nil {
+		log.Error("load account stats", "err", err)
+	}
 	if err := svc.RecoverPendingRecordings(ctx); err != nil {
 		log.Error("recover pending recordings", "err", err)
 	}
