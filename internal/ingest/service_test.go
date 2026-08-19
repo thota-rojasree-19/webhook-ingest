@@ -216,4 +216,117 @@ func TestConcurrentIngestDirect(t *testing.T) {
 	}
 }
 
+func TestRecordingProcessedAfterHTTPResponse(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("post: got %d, want 200", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// Wait long enough for recording processing (50ms) to complete
+	time.Sleep(150 * time.Millisecond)
+
+	var processed bool
+	row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan recording_processed: %v", err)
+	}
+	if !processed {
+		t.Fatalf("expected recording_processed to be true for call %s", callID)
+	}
+}
+
+func TestServiceShutdownWaitsForRecording(t *testing.T) {
+	st := testutil.NewStore(t)
+	cfg := config.Load()
+	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("redis: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  100,
+		RecordingURL: "https://example.com/rec.wav",
+		OccurredAt:   time.Now(),
+	}
+
+	if err := svc.Ingest(ctx, evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	var processed bool
+	if err := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID).Scan(&processed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected recording_processed to be true after Shutdown")
+	}
+}
+
+func TestRecoverPendingRecordings(t *testing.T) {
+	st := testutil.NewStore(t)
+	cfg := config.Load()
+	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("redis: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	_, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	_, err = st.Pool().Exec(ctx,
+		`INSERT INTO calls (call_id, account_id, status, duration_sec, recording_url, recording_processed, updated_at)
+		 VALUES ($1, $2, 'completed', 50, 'https://example.com/a.wav', FALSE, now())`,
+		callID, accountID)
+	if err != nil {
+		t.Fatalf("insert call: %v", err)
+	}
+
+	if err := svc.RecoverPendingRecordings(ctx); err != nil {
+		t.Fatalf("RecoverPendingRecordings: %v", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	var processed bool
+	if err := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID).Scan(&processed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected recording_processed to be true after recovery")
+	}
+}
+
+
+
 

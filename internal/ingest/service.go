@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,6 +23,7 @@ type Service struct {
 	cache *stats.Cache
 	rdb   *redis.Client
 	log   *slog.Logger
+	wg    sync.WaitGroup
 }
 
 // New builds a Service.
@@ -66,9 +68,12 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 
 	// Recordings are slow to fetch, so that part does not block the provider.
 	if rec.RecordingURL != "" {
+		s.wg.Add(1)
 		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
-				// TODO: handle
+			defer s.wg.Done()
+			bgCtx := context.WithoutCancel(ctx)
+			if err := s.processRecording(bgCtx, rec); err != nil {
+				s.log.Error("process recording failed", "call_id", rec.CallID, "err", err)
 			}
 		}()
 	}
@@ -81,4 +86,38 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 func (s *Service) processRecording(ctx context.Context, rec store.Event) error {
 	time.Sleep(recordingWork)
 	return s.store.MarkRecordingProcessed(ctx, rec.CallID)
+}
+
+// Shutdown waits for active background recording tasks to complete or until ctx is done.
+func (s *Service) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// RecoverPendingRecordings processes any calls with unprocessed recordings in the background.
+func (s *Service) RecoverPendingRecordings(ctx context.Context) error {
+	callIDs, err := s.store.PendingRecordings(ctx)
+	if err != nil {
+		return err
+	}
+	for _, callID := range callIDs {
+		callID := callID
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			if err := s.processRecording(context.Background(), store.Event{CallID: callID}); err != nil {
+				s.log.Error("recovery process recording failed", "call_id", callID, "err", err)
+			}
+		}()
+	}
+	return nil
 }

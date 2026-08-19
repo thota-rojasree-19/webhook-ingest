@@ -187,3 +187,24 @@ func (s *Store) AccountStats(ctx context.Context, accountID string) (Stats, erro
 	}
 	return st, nil
 }
+
+// PendingRecordings returns call_ids for calls that have a recording_url but are not yet marked processed.
+func (s *Store) PendingRecordings(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT call_id FROM calls WHERE recording_url IS NOT NULL AND recording_url != '' AND recording_processed = FALSE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var callIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		callIDs = append(callIDs, id)
+	}
+	return callIDs, rows.Err()
+}
+

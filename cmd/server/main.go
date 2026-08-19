@@ -40,6 +40,10 @@ func main() {
 	defer func() { _ = rdb.Close() }()
 
 	svc := ingest.New(st, stats.NewCache(), rdb, log)
+	if err := svc.RecoverPendingRecordings(ctx); err != nil {
+		log.Error("recover pending recordings", "err", err)
+	}
+
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: httpapi.NewRouter(svc, log)}
 
 	go func() {
@@ -58,6 +62,9 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown", "err", err)
+		log.Error("shutdown server", "err", err)
+	}
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown background tasks", "err", err)
 	}
 }
